@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -776,6 +777,23 @@ bool PreloadAllPipelines() {
         return value != nullptr && value[0] == '1';
     }();
     return all;
+}
+
+// EDEN_NX2_PIPELINE_EVICT_FRAMES=N destroys a graphics pipeline that no draw used for N frames.
+// 0 keeps every pipeline, which trades driver memory (~0.45 MB each) for no rebuilds when the game
+// returns to a place. Unset or not a number: 9000, about 2.5 minutes at 60 fps.
+u64 PipelineEvictFrames() {
+    static const u64 frames = [] {
+        constexpr u64 Default = 9000;
+        const char* value = std::getenv("EDEN_NX2_PIPELINE_EVICT_FRAMES");
+        if (value == nullptr || value[0] < '0' || value[0] > '9') {
+            return Default;
+        }
+        char* end = nullptr;
+        const unsigned long long parsed = std::strtoull(value, &end, 10);
+        return *end == '\0' ? static_cast<u64>(parsed) : Default;
+    }();
+    return frames;
 }
 } // Anonymous namespace
 
@@ -1688,9 +1706,10 @@ void PipelineCache::EvictUnusedPipelines() {
     }
     // Each built pipeline holds ~0.45 MB of driver memory and none was ever destroyed, so it grew
     // with every place a session went (title 1: 1,500 on its title screen alone). One unused for
-    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache.
-    constexpr u64 EvictAfterFrames = 9000;
-    if (frame_count <= EvictAfterFrames) {
+    // this long is destroyed; it takes 2-3 ms to build again from the driver's pipeline cache, but
+    // a game that returns to a place rebuilds hundreds at once on the GPU thread (issue #293).
+    const u64 EvictAfterFrames = PipelineEvictFrames();
+    if (EvictAfterFrames == 0 || frame_count <= EvictAfterFrames) {
         return;
     }
     const u64 cutoff = frame_count - EvictAfterFrames;
